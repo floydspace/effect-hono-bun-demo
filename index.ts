@@ -1,142 +1,128 @@
-import { Console, Effect, pipe } from "effect";
-import { Hono } from "hono";
-import { Database } from "bun:sqlite";
+import { Console, Effect, Layer, Runtime } from "effect";
+import { HonoServer } from "./HonoServer";
+import { Database, NoteRepository, NoteRepositoryLive } from "./NoteRepository";
 
-interface Note {
-  id: number;
-  content: string;
-}
+const NoteRouteLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const app = yield* HonoServer;
+    const runPromise = Runtime.runPromise(
+      yield* Effect.runtime<NoteRepository>()
+    );
 
-const db = new Database();
-db.query(
-  "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, content TEXT UNIQUE)"
-).all();
+    app.post("/notes", async (c) =>
+      Effect.gen(function* () {
+        const noteRepository = yield* NoteRepository;
 
-const app = new Hono();
+        const { content } = yield* Effect.tryPromise(() =>
+          c.req.json<{ content: string }>()
+        );
 
-app.post("/notes", async (c) => {
-  return Effect.runPromise(
-    pipe(
-      Effect.tryPromise(() => c.req.json<{ content: string }>()),
-      Effect.tryMap({
-        try: ({ content }) => {
-          return db.query("INSERT INTO notes (content) VALUES ($content)").all({
-            $content: content,
-          });
-        },
-        catch: (e) => {
-          return pipe(Console.log(e), Effect.fail);
-        },
-      }),
-      Effect.tryMap({
-        try: () => {
-          return db.query("SELECT * FROM notes").all();
-        },
-        catch: (e) => {
-          return pipe(Console.log(e), Effect.fail);
-        },
-      }),
-      Effect.match({
-        onSuccess: (result) => {
-          c.status(201);
-          return c.json(result);
-        },
-        onFailure: () => {
-          c.status(500);
-          return c.text("Error creating note");
-        },
-      })
-    )
-  );
-});
+        yield* noteRepository.createNote(content);
 
-app.get("/notes", async (c) => {
-  return Effect.runPromise(
-    pipe(
-      Effect.try(() => {
-        return db.query("SELECT * FROM notes").all() as Note[];
-      }),
-      Effect.match({
-        onSuccess: (result) => {
-          c.status(200);
-          return c.json(result);
-        },
-        onFailure: (e) => {
-          Effect.runFork(Console.error(e));
-          c.status(500);
-          return c.text("Error getting notes");
-        },
-      })
-    )
-  );
-});
+        const result = yield* noteRepository.getAllNotes();
 
-app.delete("/notes", async (c) => {
-  return Effect.runPromise(
-    pipe(
-      Effect.try(() => {
-        return db.query("DELETE FROM notes").all();
-      }),
-      Effect.match({
-        onSuccess: () => {
-          c.status(200);
-          return c.text("Notes deleted successfully");
-        },
-        onFailure: (e) => {
-          Effect.runFork(Console.error(e));
-          c.status(500);
-          return c.text("Error deleting notes");
-        },
-      })
-    )
-  );
-});
+        c.status(201);
+        return c.json(result);
+      }).pipe(
+        Effect.catchAll((e) =>
+          Effect.gen(function* () {
+            yield* Console.error(e);
+            c.status(500);
+            return c.text("Error creating note");
+          })
+        ),
+        runPromise
+      )
+    );
 
-app.get("/notes/:id", async (c) => {
-  return Effect.runPromise(
-    pipe(
-      Effect.try(() => c.req.param("id")),
-      Effect.map((id) => {
-        return db
-          .query("SELECT * FROM notes where notes.id = $id LIMIT 1")
-          .all({ $id: id }) as Note[];
-      }),
-      Effect.match({
-        onSuccess: (result) => {
-          c.status(200);
-          return c.json(result);
-        },
-        onFailure: (e) => {
-          Effect.runFork(Console.error(e));
-          c.status(500);
-          return c.text("Error getting note");
-        },
-      })
-    )
-  );
-});
+    app.get("/notes", async (c) =>
+      Effect.gen(function* () {
+        const noteRepository = yield* NoteRepository;
 
-app.delete("/notes/:id", async (c) => {
-  return Effect.runPromise(
-    pipe(
-      Effect.try(() => {
-        return db
-          .query("DELETE FROM notes where id = $id")
-          .all({ $id: c.req.param("id") });
-      }),
-      Effect.match({
-        onSuccess: () => {
-          c.status(200);
-          return c.text("Notes deleted successfully");
-        },
-        onFailure: (e) => {
-          Effect.runFork(Console.error(e));
-          c.status(500);
-          return c.text("Error deleting notes");
-        },
-      })
-    )
-  );
-});
+        const result = yield* noteRepository.getAllNotes();
 
-export default app;
+        c.status(200);
+        return c.json(result);
+      }).pipe(
+        Effect.catchAll((e) =>
+          Effect.gen(function* () {
+            yield* Console.error(e);
+            c.status(500);
+            return c.text("Error getting notes");
+          })
+        ),
+        runPromise
+      )
+    );
+
+    app.delete("/notes", async (c) =>
+      Effect.gen(function* () {
+        const noteRepository = yield* NoteRepository;
+
+        yield* noteRepository.deleteAllNotes();
+
+        c.status(200);
+        return c.text("Notes deleted successfully");
+      }).pipe(
+        Effect.catchAll((e) =>
+          Effect.gen(function* () {
+            yield* Console.error(e);
+            c.status(500);
+            return c.text("Error deleting notes");
+          })
+        ),
+        runPromise
+      )
+    );
+
+    app.get("/notes/:id", async (c) =>
+      Effect.gen(function* () {
+        const noteRepository = yield* NoteRepository;
+
+        const id = c.req.param("id");
+
+        const result = yield* noteRepository.getNote(id);
+
+        c.status(200);
+        return c.json(result);
+      }).pipe(
+        Effect.catchAll((e) =>
+          Effect.gen(function* () {
+            yield* Console.error(e);
+            c.status(500);
+            return c.text("Error getting note");
+          })
+        ),
+        runPromise
+      )
+    );
+
+    app.delete("/notes/:id", async (c) =>
+      Effect.gen(function* () {
+        const noteRepository = yield* NoteRepository;
+
+        yield* noteRepository.deleteNote(c.req.param("id"));
+
+        c.status(200);
+        return c.text("Notes deleted successfully");
+      }).pipe(
+        Effect.catchAll((e) =>
+          Effect.gen(function* () {
+            yield* Console.error(e);
+            c.status(500);
+            return c.text("Error deleting notes");
+          })
+        ),
+        runPromise
+      )
+    );
+  })
+);
+
+export default await HonoServer.pipe(
+  Effect.provide(NoteRouteLive),
+  Effect.provide(HonoServer.Live),
+  Effect.provide(NoteRepositoryLive),
+  Effect.provide(Database.Live),
+  Effect.runPromise
+);
